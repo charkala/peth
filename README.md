@@ -132,6 +132,7 @@ peth assert chain --id 10                 # Verify chain ID
 ```bash
 peth start --headless                     # Start Pinchtab
 peth stop                                 # Stop Pinchtab
+peth update                               # Self-update to latest release
 ```
 
 ### Dev Chains
@@ -189,6 +190,7 @@ internal/
   script/         YAML workflow runner
   event/          Contract event listener
   lifecycle/      Process management
+  update/         Self-update from GitHub releases
   mcp/            MCP tool server
 testutil/         Shared test helpers
 ```
