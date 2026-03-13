@@ -33,3 +33,6 @@ coverage.html
 .agents/skills/*
 !.agents/skills/peth/
 .claude/
+
+# Notes
+NOTES.md
