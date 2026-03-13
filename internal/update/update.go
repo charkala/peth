@@ -2,6 +2,7 @@
 package update
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -105,4 +106,12 @@ func (u *Updater) Run() error {
 	}
 
 	return nil
+}
+
+// HintSudo wraps a permission error with a suggestion to use sudo.
+func HintSudo(err error) error {
+	if err != nil && errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%w\n\nTry running: sudo peth update", err)
+	}
+	return err
 }

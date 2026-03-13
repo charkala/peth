@@ -3,6 +3,7 @@ package update
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +121,30 @@ func TestUpdaterReplacesAtomically(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if string(got) != "new-binary" {
 		t.Errorf("binary = %q, want %q", got, "new-binary")
+	}
+}
+
+func TestHintSudoPermissionError(t *testing.T) {
+	err := fmt.Errorf("failed to create temp file: %w", os.ErrPermission)
+	result := HintSudo(err)
+	if result == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(result.Error(), "sudo peth update") {
+		t.Errorf("expected sudo hint, got: %s", result.Error())
+	}
+}
+
+func TestHintSudoOtherError(t *testing.T) {
+	err := fmt.Errorf("network timeout")
+	result := HintSudo(err)
+	if result.Error() != err.Error() {
+		t.Errorf("expected original error, got: %s", result.Error())
+	}
+}
+
+func TestHintSudoNil(t *testing.T) {
+	if HintSudo(nil) != nil {
+		t.Error("expected nil for nil input")
 	}
 }

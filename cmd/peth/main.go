@@ -831,7 +831,7 @@ func runUpdate(w io.Writer) error {
 	}
 	fmt.Fprintln(w, "Updating peth...")
 	if err := u.Run(); err != nil {
-		return err
+		return update.HintSudo(err)
 	}
 	fmt.Fprintln(w, "Updated successfully. Run 'peth version' to verify.")
 	return nil
