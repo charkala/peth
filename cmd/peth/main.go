@@ -18,6 +18,7 @@ import (
 	"github.com/charkala/peth/internal/lifecycle"
 	"github.com/charkala/peth/internal/script"
 	"github.com/charkala/peth/internal/tx"
+	"github.com/charkala/peth/internal/update"
 	"github.com/charkala/peth/internal/wallet"
 )
 
@@ -161,6 +162,9 @@ func run(args []string, stdout, stderr io.Writer, passthrough passthroughFunc, c
 
 	case "stop":
 		return runStop()
+
+	case "update":
+		return runUpdate(stdout)
 
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
@@ -820,6 +824,19 @@ func runStop() error {
 	return mgr.Stop()
 }
 
+func runUpdate(w io.Writer) error {
+	u, err := update.NewUpdater()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "Updating peth...")
+	if err := u.Run(); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "Updated successfully. Run 'peth version' to verify.")
+	return nil
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: peth [flags] <command> [args...]")
 	fmt.Fprintln(w, "")
@@ -859,6 +876,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  devchain [cmd]         Manage local dev chain")
 	fmt.Fprintln(w, "  start [flags]          Start Pinchtab")
 	fmt.Fprintln(w, "  stop                   Stop Pinchtab")
+	fmt.Fprintln(w, "  update                 Update peth to the latest version")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Other:")
 	fmt.Fprintln(w, "  version                Print version")

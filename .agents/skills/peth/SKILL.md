@@ -54,6 +54,7 @@ Supported ecosystems:
 ### Lifecycle Commands
 - `peth start [--headless] [--port N]` — Start a Pinchtab instance
 - `peth stop` — Stop the running Pinchtab instance
+- `peth update` — Self-update to the latest release
 
 ### Development Chain Commands
 - `peth devchain start [--tool anvil|hardhat] [--port N]` — Start a local dev chain
