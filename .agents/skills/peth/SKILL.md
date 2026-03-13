@@ -1,7 +1,7 @@
 ---
 name: peth
 description: Web3 browser automation CLI - wallet management, chain switching, transaction signing, and dApp interactions via Pinchtab
-version: 0.1.1
+version: 0.2.0
 tools:
   - peth
 ---
