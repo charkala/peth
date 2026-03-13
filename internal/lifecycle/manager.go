@@ -69,6 +69,7 @@ func (o StartOpts) toArgs() []string {
 type Manager struct {
 	cmd     Commander
 	process *os.Process
+	PIDFile string // path to PID file for cross-process stop
 }
 
 // NewManager creates a Manager with the given Commander.
@@ -86,19 +87,48 @@ func (m *Manager) Start(opts StartOpts) error {
 		return fmt.Errorf("failed to start pinchtab: %w", err)
 	}
 	m.process = p
+	if m.PIDFile != "" {
+		if err := os.WriteFile(m.PIDFile, []byte(strconv.Itoa(p.Pid)), 0600); err != nil {
+			return fmt.Errorf("failed to write PID file: %w", err)
+		}
+	}
 	return nil
 }
 
 // Stop sends SIGTERM to the Pinchtab subprocess and waits for exit.
+// If no in-memory process is tracked, it reads the PID file written by Start.
 func (m *Manager) Stop() error {
+	if m.process == nil && m.PIDFile != "" {
+		data, err := os.ReadFile(m.PIDFile)
+		if err == nil {
+			pid, err := strconv.Atoi(string(data))
+			if err == nil {
+				p, _ := os.FindProcess(pid)
+				// Verify the process is alive before adopting it.
+				if p != nil && syscall.Kill(pid, 0) == nil {
+					m.process = p
+				}
+			}
+		}
+	}
 	if m.process == nil {
+		// Clean up stale PID file if present.
+		if m.PIDFile != "" {
+			os.Remove(m.PIDFile)
+		}
 		return fmt.Errorf("pinchtab is not running")
 	}
-	if err := m.cmd.Signal(m.process, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("failed to stop pinchtab: %w", err)
+	sigErr := m.cmd.Signal(m.process, syscall.SIGTERM)
+	if sigErr == nil {
+		m.cmd.Wait(m.process)
 	}
-	m.cmd.Wait(m.process)
 	m.process = nil
+	if m.PIDFile != "" {
+		os.Remove(m.PIDFile)
+	}
+	if sigErr != nil {
+		return fmt.Errorf("failed to stop pinchtab: %w", sigErr)
+	}
 	return nil
 }
 

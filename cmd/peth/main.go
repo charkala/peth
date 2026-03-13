@@ -784,6 +784,14 @@ func runDevchain(args []string, stdout io.Writer, makeRegistry func() *chain.Reg
 
 // --- Lifecycle commands ---
 
+func pethPIDFile() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "peth", "pinchtab.pid")
+}
+
 func runStart(args []string) error {
 	startFs := flag.NewFlagSet("start", flag.ContinueOnError)
 	headless := startFs.Bool("headless", false, "Run headless")
@@ -792,7 +800,12 @@ func runStart(args []string) error {
 	if err := startFs.Parse(args); err != nil {
 		return err
 	}
+	pidFile := pethPIDFile()
+	if err := os.MkdirAll(filepath.Dir(pidFile), 0755); err != nil {
+		return fmt.Errorf("failed to create PID directory: %w", err)
+	}
 	mgr := lifecycle.NewManager(&lifecycle.ExecCommander{})
+	mgr.PIDFile = pidFile
 	return mgr.Start(lifecycle.StartOpts{
 		Headless: *headless,
 		Port:     *port,
@@ -803,6 +816,7 @@ func runStart(args []string) error {
 
 func runStop() error {
 	mgr := lifecycle.NewManager(&lifecycle.ExecCommander{})
+	mgr.PIDFile = pethPIDFile()
 	return mgr.Stop()
 }
 

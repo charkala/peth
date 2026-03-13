@@ -176,6 +176,124 @@ func TestManagerStopNotRunning(t *testing.T) {
 	}
 }
 
+// --- PID file tests ---
+
+func TestPIDFileWrittenOnStart(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := dir + "/pinchtab.pid"
+	mock := &mockCommander{pid: 12345}
+	m := NewManager(mock)
+	m.PIDFile = pidPath
+
+	if err := m.Start(StartOpts{BinPath: "pinchtab"}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("expected PID file to exist: %v", err)
+	}
+	if string(data) != "12345" {
+		t.Errorf("PID file = %q, want %q", string(data), "12345")
+	}
+
+	info, _ := os.Stat(pidPath)
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("PID file permissions = %o, want 0600", perm)
+	}
+}
+
+func TestPIDFileRemovedOnStop(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := dir + "/pinchtab.pid"
+	mock := &mockCommander{pid: 12345}
+	m := NewManager(mock)
+	m.PIDFile = pidPath
+
+	m.Start(StartOpts{BinPath: "pinchtab"})
+	m.Stop()
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected PID file to be removed after Stop")
+	}
+}
+
+func TestStopReadsPIDFileWhenNoProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := dir + "/pinchtab.pid"
+
+	// Write our own PID — we know it's alive, so syscall.Kill(pid, 0) succeeds.
+	self := os.Getpid()
+	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", self)), 0600)
+
+	mock := &mockCommander{}
+	m := NewManager(mock)
+	m.PIDFile = pidPath
+
+	// Stop should read the PID file and signal the process.
+	err := m.Stop()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.stopped {
+		t.Error("expected Signal to be called")
+	}
+
+	// PID file should be cleaned up.
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected PID file to be removed after Stop")
+	}
+}
+
+func TestStopStalePIDFileCleanedUp(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := dir + "/pinchtab.pid"
+
+	// Write a PID that doesn't correspond to a running process.
+	os.WriteFile(pidPath, []byte("999999999"), 0600)
+
+	mock := &mockCommander{}
+	m := NewManager(mock)
+	m.PIDFile = pidPath
+
+	err := m.Stop()
+	if err == nil {
+		t.Fatal("expected error for stale PID")
+	}
+
+	// Stale PID file should be cleaned up.
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected stale PID file to be removed")
+	}
+}
+
+func TestStopCorruptedPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := dir + "/pinchtab.pid"
+
+	os.WriteFile(pidPath, []byte("not-a-number"), 0600)
+
+	mock := &mockCommander{}
+	m := NewManager(mock)
+	m.PIDFile = pidPath
+
+	err := m.Stop()
+	if err == nil {
+		t.Fatal("expected error for corrupted PID file")
+	}
+}
+
+func TestStopNoPIDFileAndNoProcess(t *testing.T) {
+	mock := &mockCommander{}
+	m := NewManager(mock)
+	m.PIDFile = "/nonexistent/pinchtab.pid"
+
+	err := m.Stop()
+	if err == nil {
+		t.Fatal("expected error when no process and no PID file")
+	}
+}
+
 func TestManagerIsRunning(t *testing.T) {
 	mock := &mockCommander{pid: 99999}
 	m := NewManager(mock)
