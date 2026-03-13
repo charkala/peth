@@ -32,27 +32,11 @@ peth wraps Pinchtab's browser automation and adds first-class web3 support:
 
 ## Installation
 
-### Download a release binary
-
-Grab the latest from the [releases page](https://github.com/charkala/peth/releases):
-
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/charkala/peth/releases/latest/download/peth-darwin-arm64 -o peth
-chmod +x peth && sudo mv peth /usr/local/bin/
-
-# macOS (Intel)
-curl -L https://github.com/charkala/peth/releases/latest/download/peth-darwin-amd64 -o peth
-chmod +x peth && sudo mv peth /usr/local/bin/
-
-# Linux (x86_64)
-curl -L https://github.com/charkala/peth/releases/latest/download/peth-linux-amd64 -o peth
-chmod +x peth && sudo mv peth /usr/local/bin/
-
-# Linux (ARM64)
-curl -L https://github.com/charkala/peth/releases/latest/download/peth-linux-arm64 -o peth
-chmod +x peth && sudo mv peth /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/charkala/peth/main/install.sh | bash
 ```
+
+Or [download a binary directly](https://github.com/charkala/peth/releases/latest).
 
 ### Build from source
 
