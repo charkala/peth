@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "pinchtab": {
+      "source": "pinchtab/pinchtab",
+      "sourceType": "github",
+      "computedHash": "90f80515c612501c6eb3e526447f4fca411a945467b2ba96e1cd59274f62b2fc"
+    }
+  }
+}

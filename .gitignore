@@ -1,0 +1,35 @@
+# Go
+/peth
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+coverage.out
+coverage.html
+
+# Environment
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Agents
+.agent/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/peth/
+.claude/
