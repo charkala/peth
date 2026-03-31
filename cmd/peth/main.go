@@ -87,7 +87,18 @@ func run(args []string, stdout, stderr io.Writer, passthrough passthroughFunc, c
 	cmdArgs := remaining[1:]
 
 	// Pinchtab passthrough commands.
+	// For "nav": if a wallet is active, inject the EIP-1193 provider preload
+	// via CDP before navigating, so wallet-detection SDKs (Privy, Dynamic, etc.)
+	// see window.ethereum during their initialization.
 	if isPinchtabCommand(cmd) {
+		if cmd == "nav" && len(cmdArgs) > 0 {
+			if err := runNavWithPreload(cmdArgs, passthrough, cfg); err != nil {
+				// Non-fatal: fall through to normal nav if preload fails.
+				_ = err
+			} else {
+				return nil
+			}
+		}
 		return passthrough(cmd, cmdArgs)
 	}
 
@@ -235,6 +246,9 @@ func runWallet(args []string, stdout io.Writer, makeKeystore func() (*wallet.Key
 		}
 		fmt.Fprintf(stdout, "Active wallet set to %q\n", args[1])
 		return nil
+
+	case "sign":
+		return runWalletSign(args[1:], stdout, makeKeystore)
 
 	default:
 		return fmt.Errorf("unknown wallet command: %s", args[0])
@@ -625,19 +639,15 @@ func runDapp(args []string, stdout io.Writer, makeClient func() client.Pinchtab,
 			return err
 		}
 
-		// Poll for a pending personal_sign request (Privy and similar SDKs).
-		// Try up to 10 times with 500ms intervals.
-		for i := 0; i < 10; i++ {
-			resolved, err := connector.ResolvePendingSign()
-			if err != nil {
-				break // non-fatal: sign bridge may not be needed
-			}
-			if resolved {
-				break
-			}
-			// Small sleep between polls would require time import — skip for now.
-			// In practice, the JS promise resolves quickly after connect.
-			_ = i
+		// Poll for a pending personal_sign request.
+		// SDKs like Privy issue a SIWE challenge immediately after wallet connection.
+		// Poll for up to 10 seconds (20 × 500ms).
+		sig, err := connector.WaitAndSign(20, 500*time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("sign challenge: %w", err)
+		}
+		if sig != "" {
+			fmt.Fprintf(stdout, "Signed SIWE challenge\n")
 		}
 
 		fmt.Fprintf(stdout, "Connected wallet %s to dApp\n", activeKey.Address)
