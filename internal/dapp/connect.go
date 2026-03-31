@@ -4,6 +4,7 @@ package dapp
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charkala/peth/internal/wallet"
 )
@@ -91,6 +92,7 @@ const providerJS = `
   };
   window.ethereum = provider;
   window.__pethProvider = provider;
+  return "ok";
 })();
 `
 
@@ -208,12 +210,14 @@ func (c *Connector) injectProvider() error {
 	// We install a function that posts to a peth-controlled endpoint.
 	// For now, we pre-sign a pending message by polling __pethPendingSign.
 	signingBridgeJS := `
-window.__pethSignMessage = function(message) {
-  return new Promise(function(resolve, reject) {
-    window.__pethPendingSign = { message: message, resolve: resolve, reject: reject };
-  });
-};
-`
+(function() {
+  window.__pethSignMessage = function(message) {
+    return new Promise(function(resolve, reject) {
+      window.__pethPendingSign = { message: message, resolve: resolve, reject: reject };
+    });
+  };
+  return "ok";
+})()`
 	if _, err := c.client.Eval(signingBridgeJS); err != nil {
 		return fmt.Errorf("inject signing bridge: %w", err)
 	}
@@ -231,9 +235,9 @@ func (c *Connector) ResolvePendingSign() (bool, error) {
 	}
 
 	// Check for a pending sign request.
-	result, err := c.client.Eval(`
-		window.__pethPendingSign ? window.__pethPendingSign.message : null
-	`)
+	result, err := c.client.Eval(
+		`window.__pethPendingSign ? window.__pethPendingSign.message : null`,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -241,8 +245,17 @@ func (c *Connector) ResolvePendingSign() (bool, error) {
 		return false, nil // no pending sign
 	}
 
+	// Decode hex-encoded message (Privy sends messages as 0x-prefixed hex).
+	message := result
+	if len(result) > 2 && result[:2] == "0x" {
+		b, err := hexDecode(result[2:])
+		if err == nil {
+			message = string(b)
+		}
+	}
+
 	// Sign the message with real secp256k1.
-	sig, err := wallet.PersonalSign(c.privKey, result)
+	sig, err := wallet.PersonalSign(c.privKey, message)
 	if err != nil {
 		return false, fmt.Errorf("sign message: %w", err)
 	}
@@ -254,9 +267,9 @@ func (c *Connector) ResolvePendingSign() (bool, error) {
 			window.__pethPendingSign = null;
 			if (pending && pending.resolve) {
 				pending.resolve(%q);
-				return true;
+				return "resolved";
 			}
-			return false;
+			return "no pending";
 		})()
 	`, sig)
 
@@ -265,6 +278,58 @@ func (c *Connector) ResolvePendingSign() (bool, error) {
 	}
 
 	return true, nil
+}
+
+// WaitAndSign polls for a pending personal_sign request and resolves it.
+// It retries up to maxAttempts times with the given interval between checks.
+// Returns the signature if resolved, empty string if nothing pending within timeout.
+func (c *Connector) WaitAndSign(maxAttempts int, interval time.Duration) (string, error) {
+	if len(c.privKey) == 0 {
+		return "", fmt.Errorf("no private key for signing")
+	}
+	for i := 0; i < maxAttempts; i++ {
+		time.Sleep(interval)
+		resolved, err := c.ResolvePendingSign()
+		if err != nil {
+			return "", err
+		}
+		if resolved {
+			return "signed", nil
+		}
+	}
+	return "", nil
+}
+
+// hexDecode decodes a hex string to bytes.
+func hexDecode(s string) ([]byte, error) {
+	if len(s)%2 != 0 {
+		s = "0" + s
+	}
+	b := make([]byte, len(s)/2)
+	for i := range b {
+		hi, err := hexNibble(s[2*i])
+		if err != nil {
+			return nil, err
+		}
+		lo, err := hexNibble(s[2*i+1])
+		if err != nil {
+			return nil, err
+		}
+		b[i] = hi<<4 | lo
+	}
+	return b, nil
+}
+
+func hexNibble(c byte) (byte, error) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', nil
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, nil
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, nil
+	}
+	return 0, fmt.Errorf("invalid hex char: %c", c)
 }
 
 // findConnectButton looks for known connect-wallet button refs in the snapshot text.
