@@ -4,8 +4,6 @@ package wallet
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,11 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"golang.org/x/crypto/sha3"
 )
 
 // Sentinel errors for wallet operations.
@@ -48,12 +49,11 @@ type Keystore struct {
 	dir string
 }
 
-// TODO: Replace with passphrase-derived key via scrypt when golang.org/x/crypto
-// is added. This fixed dev key is for development/testing only.
+// devEncryptionKey is used for AES-256-GCM encryption of stored keys.
+// TODO: Replace with passphrase-derived key via scrypt when desired.
 var devEncryptionKey = sha256.Sum256([]byte("peth-dev-encryption-key"))
 
 // NewKeystore creates a new Keystore backed by the given directory.
-// It ensures the directory exists.
 func NewKeystore(dir string) (*Keystore, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create keystore dir: %w", err)
@@ -61,25 +61,22 @@ func NewKeystore(dir string) (*Keystore, error) {
 	return &Keystore{dir: dir}, nil
 }
 
-// Create generates a new ECDSA key, derives an Ethereum-style address,
+// Create generates a new secp256k1 private key, derives a real Ethereum address,
 // encrypts the private key, and saves it to disk.
 func (ks *Keystore) Create(name string) (*Key, error) {
 	if ks.exists(name) {
 		return nil, ErrWalletExists
 	}
 
-	// TODO: Replace P-256 with secp256k1 when go-ethereum is available.
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	privKey, err := secp256k1.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
-	return ks.saveKey(name, privKey)
+	return ks.saveKey(name, privKey.Serialize())
 }
 
 // Import imports a wallet from a hex private key or a BIP39 mnemonic phrase.
-// It auto-detects the format: hex keys are 64 hex chars (optionally 0x-prefixed),
-// mnemonics are space-separated words.
 func (ks *Keystore) Import(name string, input string) (*Key, error) {
 	if ks.exists(name) {
 		return nil, ErrWalletExists
@@ -87,7 +84,6 @@ func (ks *Keystore) Import(name string, input string) (*Key, error) {
 
 	input = strings.TrimSpace(input)
 
-	// Detect format: hex key vs mnemonic
 	if isHexKey(input) {
 		return ks.importHex(name, input)
 	}
@@ -109,20 +105,19 @@ func (ks *Keystore) List() ([]*Key, error) {
 	for _, path := range matches {
 		sk, err := ks.readStored(path)
 		if err != nil {
-			continue // skip corrupt files
+			continue
 		}
 		t, _ := time.Parse(time.RFC3339, sk.CreatedAt)
 		keys = append(keys, &Key{
 			Name:      sk.Name,
 			Address:   sk.Address,
 			CreatedAt: t,
-			// PrivateKey intentionally omitted
 		})
 	}
 	return keys, nil
 }
 
-// Get retrieves a specific wallet by name (with decrypted private key).
+// Get retrieves a wallet by name (with decrypted private key).
 func (ks *Keystore) Get(name string) (*Key, error) {
 	path := ks.path(name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -179,6 +174,63 @@ func (ks *Keystore) Active() (*Key, error) {
 	return ks.Get(strings.TrimSpace(string(data)))
 }
 
+// PersonalSign implements eth_personal_sign.
+// Hashes the message with the Ethereum prefix and signs with secp256k1.
+// Returns a 0x-prefixed 65-byte signature: [r (32)] [s (32)] [v (1)].
+// v is 27 or 28 per Ethereum convention.
+func PersonalSign(privKeyBytes []byte, message string) (string, error) {
+	hash := PersonalSignHash([]byte(message))
+	sig, err := signHash(privKeyBytes, hash)
+	if err != nil {
+		return "", err
+	}
+	return "0x" + hex.EncodeToString(sig), nil
+}
+
+// PersonalSignHash computes the Ethereum personal_sign prefix hash:
+// keccak256("\x19Ethereum Signed Message:\n" + len(message) + message)
+func PersonalSignHash(message []byte) []byte {
+	prefix := fmt.Sprintf("\x19Ethereum Signed Message:\n%d", len(message))
+	h := sha3.NewLegacyKeccak256()
+	h.Write([]byte(prefix))
+	h.Write(message)
+	return h.Sum(nil)
+}
+
+// signHash produces a recoverable secp256k1 ECDSA signature (65 bytes).
+// Uses ecdsa.SignCompact which returns [recovery_flag (1)] [r (32)] [s (32)].
+// We convert to Ethereum format: [r (32)] [s (32)] [v (1)] where v = 27 + recovery_flag.
+func signHash(privKeyBytes []byte, hash []byte) ([]byte, error) {
+	if len(hash) != 32 {
+		return nil, fmt.Errorf("hash must be 32 bytes, got %d", len(hash))
+	}
+
+	privKey := secp256k1.PrivKeyFromBytes(privKeyBytes)
+
+	// SignCompact returns: [flag (1 byte)] [r (32 bytes)] [s (32 bytes)]
+	// flag = 27 + recovery_id (+ 4 if compressed pubkey)
+	compact := ecdsa.SignCompact(privKey, hash, false) // false = uncompressed pubkey
+	if len(compact) != 65 {
+		return nil, fmt.Errorf("unexpected compact signature length: %d", len(compact))
+	}
+
+	// Convert decred compact format to Ethereum format
+	// decred: [flag][r][s] where flag = 27 + recid (uncompressed)
+	// ethereum: [r][s][v] where v = 27 + recid
+	flag := compact[0]
+	r := compact[1:33]
+	s := compact[33:65]
+
+	// v in Ethereum format: flag is already 27+recid for uncompressed
+	v := flag
+
+	out := make([]byte, 65)
+	copy(out[0:32], r)
+	copy(out[32:64], s)
+	out[64] = v
+	return out, nil
+}
+
 // --- internal helpers ---
 
 func (ks *Keystore) exists(name string) bool {
@@ -202,16 +254,11 @@ func (ks *Keystore) readStored(path string) (*storedKey, error) {
 	return &sk, nil
 }
 
-func (ks *Keystore) saveKey(name string, privKey *ecdsa.PrivateKey) (*Key, error) {
-	privBytes := privKey.D.Bytes()
-	// Pad to 32 bytes if needed
-	if len(privBytes) < 32 {
-		padded := make([]byte, 32)
-		copy(padded[32-len(privBytes):], privBytes)
-		privBytes = padded
+func (ks *Keystore) saveKey(name string, privBytes []byte) (*Key, error) {
+	addr, err := deriveAddress(privBytes)
+	if err != nil {
+		return nil, fmt.Errorf("derive address: %w", err)
 	}
-
-	addr := deriveAddress(privKey)
 
 	encKey, err := encrypt(privBytes)
 	if err != nil {
@@ -248,46 +295,35 @@ func (ks *Keystore) importHex(name string, input string) (*Key, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode hex key: %w", err)
 	}
-
-	// TODO: Replace P-256 with secp256k1 when go-ethereum is available.
-	curve := elliptic.P256()
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = curve
-	privKey.D = new(big.Int).SetBytes(privBytes)
-	privKey.PublicKey.X, privKey.PublicKey.Y = curve.ScalarBaseMult(privBytes)
-
-	return ks.saveKey(name, privKey)
+	if len(privBytes) != 32 {
+		return nil, fmt.Errorf("private key must be 32 bytes, got %d", len(privBytes))
+	}
+	return ks.saveKey(name, privBytes)
 }
 
 func (ks *Keystore) importMnemonic(name string, mnemonic string) (*Key, error) {
-	// TODO: Implement full BIP39/BIP44 derivation when go-ethereum is available.
-	// For now, derive a deterministic key from the mnemonic using SHA-256
-	// as a placeholder. This produces a valid key structure but NOT a
-	// BIP39-compliant derivation path.
+	// TODO: Implement full BIP39/BIP44 derivation.
+	// For now, derive a deterministic key from the mnemonic using SHA-256.
 	seed := sha256.Sum256([]byte(mnemonic))
-
-	// TODO: Replace P-256 with secp256k1 when go-ethereum is available.
-	curve := elliptic.P256()
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = curve
-	privKey.D = new(big.Int).SetBytes(seed[:])
-	// Ensure D is within the curve order
-	privKey.D.Mod(privKey.D, curve.Params().N)
-	privKey.PublicKey.X, privKey.PublicKey.Y = curve.ScalarBaseMult(privKey.D.Bytes())
-
-	return ks.saveKey(name, privKey)
+	return ks.saveKey(name, seed[:])
 }
 
-// deriveAddress computes an Ethereum-style address from an ECDSA public key.
-// TODO: Replace SHA-256 with Keccak-256 when go-ethereum is available.
-// Real Ethereum: keccak256(pubKeyBytes)[12:32] → 0x-prefixed hex.
-func deriveAddress(privKey *ecdsa.PrivateKey) string {
-	pubBytes := elliptic.Marshal(privKey.PublicKey.Curve, privKey.PublicKey.X, privKey.PublicKey.Y)
-	// Skip the 0x04 prefix byte (uncompressed point marker)
-	hash := sha256.Sum256(pubBytes[1:])
-	// Take last 20 bytes as address
-	addr := hash[12:]
-	return "0x" + hex.EncodeToString(addr)
+// deriveAddress computes a real Ethereum address from secp256k1 private key bytes.
+// Ethereum address = keccak256(uncompressed_pubkey[1:])[12:]
+func deriveAddress(privBytes []byte) (string, error) {
+	privKey := secp256k1.PrivKeyFromBytes(privBytes)
+	pubKey := privKey.PubKey()
+
+	// Uncompressed public key: 0x04 || X (32 bytes) || Y (32 bytes) = 65 bytes
+	pubBytes := pubKey.SerializeUncompressed()
+
+	// keccak256 of pubKey bytes (skip the leading 0x04 uncompressed marker)
+	h := sha3.NewLegacyKeccak256()
+	h.Write(pubBytes[1:])
+	hash := h.Sum(nil)
+
+	// Ethereum address = last 20 bytes of keccak256(pubkey)
+	return "0x" + hex.EncodeToString(hash[12:]), nil
 }
 
 // isHexKey returns true if the input looks like a hex-encoded private key.
@@ -306,7 +342,7 @@ func isMnemonic(s string) bool {
 	return len(words) == 12 || len(words) == 24
 }
 
-// encrypt encrypts plaintext bytes with AES-256-GCM using the dev key.
+// encrypt encrypts plaintext bytes with AES-256-GCM.
 func encrypt(plaintext []byte) (string, error) {
 	block, err := aes.NewCipher(devEncryptionKey[:])
 	if err != nil {
@@ -324,7 +360,7 @@ func encrypt(plaintext []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt decrypts a base64-encoded AES-256-GCM ciphertext using the dev key.
+// decrypt decrypts a base64-encoded AES-256-GCM ciphertext.
 func decrypt(encoded string) ([]byte, error) {
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {

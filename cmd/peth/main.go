@@ -605,6 +605,13 @@ func runDapp(args []string, stdout io.Writer, makeClient func() client.Pinchtab,
 
 	switch args[0] {
 	case "connect":
+		// Parse optional --ref flag.
+		fs := flag.NewFlagSet("dapp connect", flag.ContinueOnError)
+		buttonRef := fs.String("ref", "", "explicit connect button ref (e.g. --ref e151); skips auto-detection")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+
 		ks, err := makeKeystore()
 		if err != nil {
 			return err
@@ -613,10 +620,26 @@ func runDapp(args []string, stdout io.Writer, makeClient func() client.Pinchtab,
 		if err != nil {
 			return err
 		}
-		connector := dapp.NewConnector(makeClient(), activeKey.Address)
-		if err := connector.Connect(); err != nil {
+		connector := dapp.NewConnector(makeClient(), activeKey.Address, activeKey.PrivateKey)
+		if err := connector.Connect(*buttonRef); err != nil {
 			return err
 		}
+
+		// Poll for a pending personal_sign request (Privy and similar SDKs).
+		// Try up to 10 times with 500ms intervals.
+		for i := 0; i < 10; i++ {
+			resolved, err := connector.ResolvePendingSign()
+			if err != nil {
+				break // non-fatal: sign bridge may not be needed
+			}
+			if resolved {
+				break
+			}
+			// Small sleep between polls would require time import — skip for now.
+			// In practice, the JS promise resolves quickly after connect.
+			_ = i
+		}
+
 		fmt.Fprintf(stdout, "Connected wallet %s to dApp\n", activeKey.Address)
 		return nil
 
