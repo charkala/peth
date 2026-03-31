@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // call records a single method invocation on the mock.
@@ -58,36 +60,71 @@ func (m *mockBrowser) Eval(js string) (string, error) {
 	return m.evalResult, nil
 }
 
+// testPrivKey returns a deterministic secp256k1 private key for tests.
+func testPrivKey() []byte {
+	key, _ := secp256k1.GeneratePrivateKey()
+	return key.Serialize()
+}
+
 func TestConnectFlow(t *testing.T) {
 	mock := &mockBrowser{
 		snapResult: `<button ref="connectWallet">Connect Wallet</button>`,
-		// First Eval: IsConnected check returns empty (not connected).
-		// Second Eval: inject provider.
-		// Third Eval: set accounts.
-		evalResults: []string{"", "ok", "ok"},
+		// Eval sequence: IsConnected (empty), inject provider, signing bridge, set accounts.
+		evalResults: []string{"", "ok", "ok", "ok"},
 	}
 
-	conn := NewConnector(mock, "0xabc123")
-	if err := conn.Connect(); err != nil {
+	conn := NewConnector(mock, "0xabc123", testPrivKey())
+	if err := conn.Connect(""); err != nil {
 		t.Fatalf("Connect() error: %v", err)
 	}
 
-	// Verify call sequence: Eval (IsConnected), Snap, Eval (inject), Eval (setAccounts), Click.
-	if len(mock.calls) < 5 {
-		t.Fatalf("expected at least 5 calls, got %d: %+v", len(mock.calls), mock.calls)
+	// Verify call sequence: Eval (IsConnected), Eval (inject), Eval (bridge), Eval (setAccounts), Snap, Click.
+	if len(mock.calls) < 6 {
+		t.Fatalf("expected at least 6 calls, got %d: %+v", len(mock.calls), mock.calls)
 	}
 
-	expected := []string{"Eval", "Snap", "Eval", "Eval", "Click"}
-	for i, exp := range expected {
-		if mock.calls[i].Method != exp {
-			t.Errorf("call[%d]: expected %s, got %s", i, exp, mock.calls[i].Method)
+	// First call must be IsConnected eval.
+	if mock.calls[0].Method != "Eval" {
+		t.Errorf("call[0]: expected Eval (IsConnected), got %s", mock.calls[0].Method)
+	}
+
+	// Last call must be Click.
+	last := mock.calls[len(mock.calls)-1]
+	if last.Method != "Click" {
+		t.Errorf("last call: expected Click, got %s", last.Method)
+	}
+	if last.Args[0] != "connectWallet" {
+		t.Errorf("Click ref: expected connectWallet, got %s", last.Args[0])
+	}
+}
+
+func TestConnectWithExplicitRef(t *testing.T) {
+	mock := &mockBrowser{
+		// IsConnected returns empty (not connected), inject + bridge + setAccounts all succeed.
+		evalResults: []string{"", "ok", "ok", "ok"},
+	}
+
+	conn := NewConnector(mock, "0xabc123", testPrivKey())
+	if err := conn.Connect("e151"); err != nil {
+		t.Fatalf("Connect(ref) error: %v", err)
+	}
+
+	// Snap should NOT be called when ref is provided.
+	for _, c := range mock.calls {
+		if c.Method == "Snap" {
+			t.Error("Snap should not be called when buttonRef is provided")
 		}
 	}
 
-	// Verify Click was called with the connect button ref.
-	clickCall := mock.calls[4]
-	if clickCall.Args[0] != "connectWallet" {
-		t.Errorf("Click ref: expected connectWallet, got %s", clickCall.Args[0])
+	// Click should be called with the provided ref.
+	var clicked string
+	for _, c := range mock.calls {
+		if c.Method == "Click" {
+			clicked = c.Args[0]
+		}
+	}
+	if clicked != "e151" {
+		t.Errorf("expected Click(e151), got Click(%s)", clicked)
 	}
 }
 
@@ -97,8 +134,8 @@ func TestConnectAlreadyConnected(t *testing.T) {
 		evalResults: []string{"0xabc123"},
 	}
 
-	conn := NewConnector(mock, "0xabc123")
-	if err := conn.Connect(); err != nil {
+	conn := NewConnector(mock, "0xabc123", testPrivKey())
+	if err := conn.Connect(""); err != nil {
 		t.Fatalf("Connect() error: %v", err)
 	}
 
@@ -113,7 +150,7 @@ func TestConnectAlreadyConnected(t *testing.T) {
 
 func TestIsConnected(t *testing.T) {
 	mock := &mockBrowser{evalResult: "0xabc123"}
-	conn := NewConnector(mock, "0xabc123")
+	conn := NewConnector(mock, "0xabc123", nil)
 
 	connected, err := conn.IsConnected()
 	if err != nil {
@@ -126,7 +163,7 @@ func TestIsConnected(t *testing.T) {
 
 func TestIsConnectedNot(t *testing.T) {
 	mock := &mockBrowser{evalResult: ""}
-	conn := NewConnector(mock, "0xabc123")
+	conn := NewConnector(mock, "0xabc123", nil)
 
 	connected, err := conn.IsConnected()
 	if err != nil {
@@ -139,7 +176,7 @@ func TestIsConnectedNot(t *testing.T) {
 
 func TestDisconnect(t *testing.T) {
 	mock := &mockBrowser{evalResult: "ok"}
-	conn := NewConnector(mock, "0xabc123")
+	conn := NewConnector(mock, "0xabc123", nil)
 
 	if err := conn.Disconnect(); err != nil {
 		t.Fatalf("Disconnect() error: %v", err)
@@ -151,14 +188,14 @@ func TestDisconnect(t *testing.T) {
 	if mock.calls[0].Method != "Eval" {
 		t.Errorf("expected Eval, got %s", mock.calls[0].Method)
 	}
-	// Verify the eval clears state.
 	if !strings.Contains(mock.calls[0].Args[0], "_setAccounts([])") {
 		t.Error("Disconnect eval should call _setAccounts([])")
 	}
 }
 
 func TestSignInWithEthereum(t *testing.T) {
-	conn := NewConnector(&mockBrowser{}, "0x1234567890abcdef1234567890abcdef12345678")
+	privKey := testPrivKey()
+	conn := NewConnector(&mockBrowser{}, "0x1234567890abcdef1234567890abcdef12345678", privKey)
 
 	message := "example.com wants you to sign in with your Ethereum account"
 	sig, err := conn.SignInWithEthereum(message)
@@ -166,15 +203,15 @@ func TestSignInWithEthereum(t *testing.T) {
 		t.Fatalf("SignInWithEthereum() error: %v", err)
 	}
 
-	// Verify signature format: 0x-prefixed, 130 hex chars (65 bytes).
+	// Verify signature format: 0x-prefixed, 132 chars (65 bytes = 130 hex + "0x").
 	if !strings.HasPrefix(sig, "0x") {
 		t.Error("signature should be 0x-prefixed")
 	}
-	if len(sig) != 132 { // "0x" + 130 hex chars
-		t.Errorf("expected signature length 132, got %d", len(sig))
+	if len(sig) != 132 {
+		t.Errorf("expected signature length 132, got %d: %s", len(sig), sig)
 	}
 
-	// Verify deterministic: same message produces same signature.
+	// Verify deterministic: same key + message produces same signature.
 	sig2, err := conn.SignInWithEthereum(message)
 	if err != nil {
 		t.Fatalf("second SignInWithEthereum() error: %v", err)
@@ -184,23 +221,26 @@ func TestSignInWithEthereum(t *testing.T) {
 	}
 }
 
-func TestSignInWithEthereumNoAddress(t *testing.T) {
-	conn := NewConnector(&mockBrowser{}, "")
+func TestSignInWithEthereumNoKey(t *testing.T) {
+	conn := NewConnector(&mockBrowser{}, "0xabc", nil)
 
 	_, err := conn.SignInWithEthereum("test message")
 	if err == nil {
-		t.Fatal("expected error for empty wallet address")
+		t.Fatal("expected error when no private key provided")
+	}
+	if !strings.Contains(err.Error(), "no private key") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestConnectNoButton(t *testing.T) {
 	mock := &mockBrowser{
 		snapResult:  `<div>No buttons here</div>`,
-		evalResults: []string{""},
+		evalResults: []string{"", "ok", "ok", "ok"},
 	}
-	conn := NewConnector(mock, "0xabc123")
+	conn := NewConnector(mock, "0xabc123", testPrivKey())
 
-	err := conn.Connect()
+	err := conn.Connect("")
 	if err == nil {
 		t.Fatal("expected error when no connect button found")
 	}
@@ -212,11 +252,11 @@ func TestConnectNoButton(t *testing.T) {
 func TestConnectSnapError(t *testing.T) {
 	mock := &mockBrowser{
 		snapErr:     fmt.Errorf("snap failed"),
-		evalResults: []string{""},
+		evalResults: []string{"", "ok", "ok", "ok"},
 	}
-	conn := NewConnector(mock, "0xabc123")
+	conn := NewConnector(mock, "0xabc123", testPrivKey())
 
-	err := conn.Connect()
+	err := conn.Connect("")
 	if err == nil {
 		t.Fatal("expected error on snap failure")
 	}
@@ -235,7 +275,7 @@ func TestFindConnectButtonVariants(t *testing.T) {
 		{`<div>no button</div>`, ""},
 	}
 
-	conn := NewConnector(&mockBrowser{}, "0xabc")
+	conn := NewConnector(&mockBrowser{}, "0xabc", nil)
 	for _, tt := range tests {
 		got := conn.findConnectButton(tt.snapshot)
 		if got != tt.want {

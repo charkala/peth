@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -378,4 +379,113 @@ func TestKeystoreEncryption(t *testing.T) {
 	if stored.Address == "" {
 		t.Error("address is empty")
 	}
+}
+
+func TestPersonalSign(t *testing.T) {
+	// Known private key — Hardhat/Anvil account #0
+	privKeyHex := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	privBytes := mustDecodeHex(privKeyHex)
+
+	message := "Hello peth"
+	sig, err := PersonalSign(privBytes, message)
+	if err != nil {
+		t.Fatalf("PersonalSign: %v", err)
+	}
+
+	// 0x + 65 bytes = 132 chars
+	if !strings.HasPrefix(sig, "0x") {
+		t.Error("signature missing 0x prefix")
+	}
+	if len(sig) != 132 {
+		t.Errorf("signature length = %d, want 132", len(sig))
+	}
+
+	// Deterministic: same inputs → same output
+	sig2, _ := PersonalSign(privBytes, message)
+	if sig != sig2 {
+		t.Error("PersonalSign is not deterministic")
+	}
+
+	// Different message → different signature
+	sigOther, _ := PersonalSign(privBytes, "Other message")
+	if sig == sigOther {
+		t.Error("different messages produced the same signature")
+	}
+}
+
+func TestPersonalSignHashPrefix(t *testing.T) {
+	// Verify prefix hash matches the Ethereum standard
+	msg := []byte("test message")
+	hash := PersonalSignHash(msg)
+	if len(hash) != 32 {
+		t.Errorf("PersonalSignHash length = %d, want 32", len(hash))
+	}
+}
+
+func TestDeriveAddressKnownKey(t *testing.T) {
+	// Hardhat/Anvil account #0: known private key → known Ethereum address
+	privKeyHex := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	expectedAddr := "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" // well-known address
+
+	addr, err := deriveAddress(mustDecodeHex(privKeyHex))
+	if err != nil {
+		t.Fatalf("deriveAddress: %v", err)
+	}
+	if !strings.EqualFold(addr, expectedAddr) {
+		t.Errorf("deriveAddress = %q, want %q", addr, expectedAddr)
+	}
+}
+
+func TestImportHexDerivesCorrectAddress(t *testing.T) {
+	dir := t.TempDir()
+	ks, _ := NewKeystore(dir)
+
+	// Anvil account #0
+	privKeyHex := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	expectedAddr := "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+	key, err := ks.Import("anvil-0", privKeyHex)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if !strings.EqualFold(key.Address, expectedAddr) {
+		t.Errorf("imported address = %q, want %q", key.Address, expectedAddr)
+	}
+}
+
+func mustDecodeHex(s string) []byte {
+	s = strings.TrimPrefix(s, "0x")
+	b, err := hexDecode(s)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func hexDecode(s string) ([]byte, error) {
+	b := make([]byte, len(s)/2)
+	for i := range b {
+		n, err := hexNibble(s[2*i])
+		if err != nil {
+			return nil, err
+		}
+		m, err := hexNibble(s[2*i+1])
+		if err != nil {
+			return nil, err
+		}
+		b[i] = byte(n<<4 | m)
+	}
+	return b, nil
+}
+
+func hexNibble(c byte) (byte, error) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', nil
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, nil
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, nil
+	}
+	return 0, fmt.Errorf("invalid hex char: %c", c)
 }
